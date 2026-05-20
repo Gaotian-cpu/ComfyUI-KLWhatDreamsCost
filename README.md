@@ -32,6 +32,7 @@ All of my nodes are created with the help of AI, so there may or may not be redu
 - Or download through the ComfyUI Manager.
 
 **❗❗IMPORTANT❗❗**
+
 If you don't see the latest version (v1.3.5) yet in the managaer then just downloaded the nightly version (or fetch the updates to update the list to see the latest version). 
 Also you will need to update ComfyUI-LTXVideo and ComfyUI-KJNodes to the latest version as well. You cannot use this node without updating ComfyUI-LTXVideo!
 
