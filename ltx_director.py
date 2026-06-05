@@ -691,7 +691,7 @@ class KLLTXDirector(io.ComfyNode):
 
 
 NODE_CLASS_MAPPINGS = {
-    "LTXDirector": LTXDirector,
+    "KL LTXDirector": KLLTXDirector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
