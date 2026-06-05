@@ -868,10 +868,20 @@ class TimelineEditor {
     uploadBtn.innerHTML = `${ICONS.upload} Add Image`;
     uploadBtn.addEventListener("click", () => this.fileInput.click());
 
+    const imageUrlBtn = document.createElement("button");
+    imageUrlBtn.className = "pr-btn";
+    imageUrlBtn.innerHTML = `${ICONS.link} Add Image URL`;
+    imageUrlBtn.addEventListener("click", () => this.promptAddImageUrl());
+
     const uploadAudioBtn = document.createElement("button");
     uploadAudioBtn.className = "pr-btn";
     uploadAudioBtn.innerHTML = `${ICONS.audio} Add Audio`;
     uploadAudioBtn.addEventListener("click", () => this.audioFileInput.click());
+
+    const audioUrlBtn = document.createElement("button");
+    audioUrlBtn.className = "pr-btn";
+    audioUrlBtn.innerHTML = `${ICONS.link} Add Audio URL`;
+    audioUrlBtn.addEventListener("click", () => this.promptAddAudioUrl());
 
     const addTextBtn = document.createElement("button");
     addTextBtn.className = "pr-btn";
@@ -1406,6 +1416,215 @@ class TimelineEditor {
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
     return { x, y };
+  }
+
+  normalizeRemoteUrl(rawUrl) {
+    const value = (rawUrl || "").trim();
+    if (!value) return null;
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        window.alert("Only http:// and https:// URLs are supported.");
+        return null;
+      }
+      return parsed.href;
+    } catch (err) {
+      window.alert("Please enter a valid URL.");
+      return null;
+    }
+  }
+
+  getRemoteFileName(url, fallback) {
+    try {
+      const parsed = new URL(url);
+      const name = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() || "");
+      return name || fallback;
+    } catch (err) {
+      return fallback;
+    }
+  }
+
+  promptAddImageUrl(targetFrameStart = null, explicitLength = null) {
+    const url = this.normalizeRemoteUrl(window.prompt("Paste image URL:", ""));
+    if (!url) return;
+    this.handleImageUrl(url, targetFrameStart, explicitLength);
+  }
+
+  promptAddAudioUrl(targetFrameStart = null) {
+    const url = this.normalizeRemoteUrl(window.prompt("Paste audio URL:", ""));
+    if (!url) return;
+    this.handleAudioUrl(url, targetFrameStart);
+  }
+
+  _resolveNewSegmentStart(targetArray, newLength, targetFrameStart) {
+    let newStart = targetFrameStart;
+
+    if (newStart === null) {
+      newStart = 0;
+      targetArray.sort((a, b) => a.start - b.start);
+      for (let i = 0; i < targetArray.length; i++) {
+        let seg = targetArray[i];
+        if (newStart + newLength <= seg.start) break;
+        newStart = Math.max(newStart, seg.start + seg.length);
+      }
+      return newStart;
+    }
+
+    const currentDuration = this.getVisualDurationFrames();
+    let tempId = "TEMP_" + Date.now();
+    targetArray.push({ id: tempId, start: newStart, length: newLength, type: "temp" });
+    let result = this._applyCenterDragPhysics(targetArray, tempId, newStart, newStart + newLength / 2, currentDuration, currentDuration, 1);
+
+    for (let shiftedSeg of result) {
+      let original = targetArray.find(s => s.id === shiftedSeg.id);
+      if (original) {
+        original.start = shiftedSeg.resolvedStart !== undefined ? shiftedSeg.resolvedStart : shiftedSeg.start;
+      }
+    }
+
+    let tempSeg = targetArray.find(s => s.id === tempId);
+    newStart = tempSeg ? tempSeg.start : newStart;
+    const tempIndex = targetArray.findIndex(s => s.id === tempId);
+    if (tempIndex !== -1) targetArray.splice(tempIndex, 1);
+    return newStart;
+  }
+
+  _buildAudioPeaks(audioBuffer) {
+    const channelData = audioBuffer.getChannelData(0);
+    const peaks = [];
+    const numPeaks = 200;
+    const step = Math.max(1, Math.floor(channelData.length / numPeaks));
+    for (let i = 0; i < numPeaks; i++) {
+      let max = 0;
+      const start = i * step;
+      const end = Math.min(channelData.length, start + step);
+      for (let j = start; j < end; j++) {
+        const val = Math.abs(channelData[j]);
+        if (val > max) max = val;
+      }
+      peaks.push(max);
+    }
+    return peaks;
+  }
+
+  async _loadRemoteAudioInfo(audioUrl) {
+    try {
+      const resp = await fetch(audioUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const arrayBuffer = await resp.arrayBuffer();
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      return {
+        duration: audioBuffer.duration,
+        peaks: this._buildAudioPeaks(audioBuffer),
+      };
+    } catch (err) {
+      console.warn("[PromptRelay] Audio URL waveform load failed; falling back to metadata/default length.", err);
+    }
+
+    try {
+      const duration = await new Promise((resolve, reject) => {
+        const audio = document.createElement("audio");
+        const timeoutId = setTimeout(() => {
+          audio.removeAttribute("src");
+          reject(new Error("Timed out while reading audio metadata."));
+        }, 10000);
+        audio.preload = "metadata";
+        audio.onloadedmetadata = () => {
+          clearTimeout(timeoutId);
+          resolve(Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 1);
+        };
+        audio.onerror = () => {
+          clearTimeout(timeoutId);
+          reject(new Error("Could not read audio metadata."));
+        };
+        audio.src = audioUrl;
+      });
+      return {duration, peaks: []};
+    } catch (err) {
+      console.warn("[PromptRelay] Audio URL metadata load failed; using a 1 second placeholder.", err);
+      return {duration: 1, peaks: []};
+    }
+  }
+
+  async handleAudioUrl(audioUrl, targetFrameStart = null) {
+    const normalizedUrl = this.normalizeRemoteUrl(audioUrl);
+    if (!normalizedUrl) return;
+
+    const frameRate = this.getFrameRate();
+    const info = await this._loadRemoteAudioInfo(normalizedUrl);
+    const clipFrames = Math.max(1, Math.ceil(info.duration * frameRate));
+    const newLength = clipFrames;
+    let newStart = this._resolveNewSegmentStart(this.timeline.audioSegments, newLength, targetFrameStart);
+
+    const seg = {
+      id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+      type: "audio",
+      start: newStart,
+      length: newLength,
+      trimStart: 0,
+      audioDurationFrames: clipFrames,
+      audioUrl: normalizedUrl,
+      fileName: this.getRemoteFileName(normalizedUrl, "remote-audio"),
+      waveformPeaks: info.peaks
+    };
+
+    this.timeline.audioSegments.push(seg);
+    this.timeline.audioSegments.sort((a, b) => a.start - b.start);
+    this.selectionType = "audio";
+    this.selectedIndex = this.timeline.audioSegments.findIndex(s => s.id === seg.id);
+
+    this.updateUIFromSelection();
+    this.commitChanges(true);
+    this.render();
+  }
+
+  async handleImageUrl(imageUrl, targetFrameStart = null, explicitLength = null) {
+    const normalizedUrl = this.normalizeRemoteUrl(imageUrl);
+    if (!normalizedUrl) return;
+
+    const frameRate = this.getFrameRate();
+    const newLength = explicitLength !== null ? explicitLength : frameRate * 1;
+
+    await new Promise((resolve) => {
+      const displayImg = new Image();
+      let didCommit = false;
+
+      const commit = (imgObj = null) => {
+        if (didCommit) return;
+        didCommit = true;
+
+        let newStart = this._resolveNewSegmentStart(this.timeline.segments, newLength, targetFrameStart);
+        const seg = {
+          id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+          start: newStart,
+          length: newLength,
+          prompt: "",
+          type: "image",
+          imageUrl: normalizedUrl,
+          imageB64: normalizedUrl
+        };
+
+        if (imgObj) seg.imgObj = imgObj;
+
+        this.timeline.segments.push(seg);
+        this.timeline.segments.sort((a, b) => a.start - b.start);
+        this.selectionType = "image";
+        this.selectedIndex = this.timeline.segments.findIndex(s => s.id === seg.id);
+
+        this.updateUIFromSelection();
+        this.commitChanges(true);
+        this.render();
+        resolve();
+      };
+
+      displayImg.onload = () => commit(displayImg);
+      displayImg.onerror = () => {
+        console.warn("[PromptRelay] Image URL preview failed; saving URL for backend execution.", normalizedUrl);
+        commit(null);
+      };
+      displayImg.src = normalizedUrl;
+    });
   }
 
   // --- Async Image Upload Logic (Handles multiple images simultaneously) ---

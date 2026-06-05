@@ -3,6 +3,8 @@ import json
 import base64
 import io as _io
 import math
+import urllib.parse
+import urllib.request
 
 import numpy as np
 import torch
@@ -31,6 +33,25 @@ log = logging.getLogger(__name__)
 GuideData = io.Custom("GUIDE_DATA")
 
 
+def _is_http_url(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(value.strip())
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def _download_url_bytes(url: str, timeout: int = 30) -> bytes:
+    req = urllib.request.Request(
+        url.strip(),
+        headers={"User-Agent": "ComfyUI-LTXDirector/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return response.read()
+
+
 def _load_image_tensor(seg: dict) -> torch.Tensor:
     """Decode an image from the ComfyUI input folder (if imageFile provided) or fallback to base64
     to a ComfyUI-style image tensor of shape [1, H, W, 3], float32 in [0, 1]."""
@@ -40,6 +61,16 @@ def _load_image_tensor(seg: dict) -> torch.Tensor:
             img = Image.open(file_path).convert("RGB")
             arr = np.array(img, dtype=np.float32) / 255.0
             return torch.from_numpy(arr).unsqueeze(0)
+
+    image_url = seg.get("imageUrl", "")
+    if _is_http_url(image_url):
+        try:
+            img_bytes = _download_url_bytes(image_url)
+            img = Image.open(_io.BytesIO(img_bytes)).convert("RGB")
+            arr = np.array(img, dtype=np.float32) / 255.0
+            return torch.from_numpy(arr).unsqueeze(0)
+        except Exception as e:
+            log.warning("[PromptRelay] Image URL load failed for %s: %s", image_url, e)
 
     b64_str = seg.get("imageB64", "")
     if not b64_str or b64_str.startswith("/view?"):
@@ -183,6 +214,14 @@ def _build_combined_audio(timeline_data_str: str, duration_frames: int, frame_ra
             if os.path.exists(file_path):
                 with open(file_path, "rb") as f:
                     buffer = _io.BytesIO(f.read())
+
+        if not buffer and seg.get("audioUrl"):
+            audio_url = seg.get("audioUrl")
+            if _is_http_url(audio_url):
+                try:
+                    buffer = _io.BytesIO(_download_url_bytes(audio_url))
+                except Exception as e:
+                    log.warning("[PromptRelay] Audio URL load failed for %s: %s", audio_url, e)
         
         if not buffer and seg.get("audioB64"):
             b64 = seg.get("audioB64")
@@ -518,7 +557,6 @@ class LTXDirector(io.ComfyNode):
                 else:
                     # Both zero — keep original dimensions, just snap to divisible_by
                     tensor = _resize_image(tensor, src_w, src_h, "maintain aspect ratio", divisible_by)
-
 
                 # Apply compression
                 if img_compression > 0:
