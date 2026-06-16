@@ -85,8 +85,7 @@ class KLLTXDirectorWrapper:
                 "clip": ("CLIP",),
                 "user_config": ("STRING", {
                     "multiline": True,
-                    "default": '{"images": [], "audio": null, "global_prompt": "", "frame_rate": 24, "width": 768, '
-                               '"height": 512} '
+                    "default": '{"images": [], "audio": null, "global_prompt": "", "frame_rate": 24, "width": 768, "height": 512}'
                 }),
             },
             "optional": {
@@ -112,7 +111,7 @@ class KLLTXDirectorWrapper:
         audio = config.get("audio")
         global_prompt = config.get("global_prompt", "")
         frame_rate = config.get("frame_rate", 24)
-        width = config.get("width", 0)          # 允许 0 表示自适应
+        width = config.get("width", 0)
         height = config.get("height", 0)
         resize_method = config.get("resize_method", "maintain aspect ratio")
         divisible_by = config.get("divisible_by", 32)
@@ -157,9 +156,10 @@ class KLLTXDirectorWrapper:
                 continue
 
             strength = item.get("strength", 1.0)
-            # 钳制 strength 范围
             strength = max(0.0, min(1.0, strength))
 
+            # ⭐ 关键修复：同时提供 imageB64（值为 URL）以通过原始节点的过滤条件
+            # 原始节点过滤时检查 (imageFile or imageB64)，但 _load_image_tensor 优先使用 imageUrl
             seg = {
                 "id": f"seg_{idx}_{id(item)}",
                 "start": start_frames,
@@ -167,6 +167,7 @@ class KLLTXDirectorWrapper:
                 "prompt": prompt,
                 "type": "image",
                 "imageUrl": url,
+                "imageB64": url,           # ⭐ 关键：用于通过过滤条件
                 "guideStrength": strength,
             }
             raw_segments.append(seg)
@@ -180,14 +181,13 @@ class KLLTXDirectorWrapper:
                 "At least one image with a valid 'url' is required for quality generation."
             )
 
-        # 3. 按 start 排序所有段（关键！）
+        # 3. 按 start 排序所有段（确保与原始节点内部排序一致）
         sorted_segments = sorted(raw_segments, key=lambda s: s["start"])
-        # 重新计算总帧数（基于排序后的段）
         total_frames = 0
         for seg in sorted_segments:
             total_frames = max(total_frames, seg["start"] + seg["length"])
 
-        # 4. 处理音频（不变）
+        # 4. 处理音频
         if audio:
             audio_start_sec = audio.get("start", 0)
             audio_duration_sec = audio.get("duration", 0)
@@ -222,14 +222,12 @@ class KLLTXDirectorWrapper:
         local_prompts = " | ".join([seg.get("prompt", "") for seg in sorted_segments])
         segment_lengths = ",".join([str(seg.get("length", 24)) for seg in sorted_segments])
 
-        # 关键修复：guide_strength 只包含图片段，按排序后的顺序
+        # guide_strength 只包含图片段，按排序后的顺序
         sorted_image_segments = [s for s in sorted_segments if s.get("type") == "image"]
         guide_strength = ",".join([str(s.get("guideStrength", 1.0)) for s in sorted_image_segments])
 
-        # 日志输出便于调试
         log.info(f"[LTX Director Wrapper] Total frames: {total_frames}, frame_rate: {frame_rate}")
         log.info(f"[LTX Director Wrapper] Image segments: {len(sorted_image_segments)}, guide_strength: {guide_strength}")
-        log.info(f"[LTX Director Wrapper] Segment prompts: {local_prompts}")
 
         # 7. 委托给原始 KLLTXDirector
         result = KLLTXDirector.execute(
