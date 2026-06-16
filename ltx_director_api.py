@@ -9,10 +9,72 @@ from .ltx_director import KLLTXDirector, GuideData
 log = logging.getLogger(__name__)
 
 
+def parse_user_config(raw_text: str) -> dict:
+    """
+    宽容解析 JSON：去除 BOM，提取第一个完整 JSON 对象，忽略尾部多余内容。
+    """
+    text = raw_text.lstrip('\ufeff').strip()
+    if not text:
+        return {}
+    decoder = json.JSONDecoder()
+    try:
+        obj, _ = decoder.raw_decode(text)
+        return obj
+    except json.JSONDecodeError:
+        start = text.find('{')
+        if start == -1:
+            raise ValueError("No JSON object found in input.")
+        try:
+            obj, _ = decoder.raw_decode(text[start:])
+            return obj
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Could not parse JSON. Received (first 200 chars):\n{text[start:start+200]}") from e
+
+
 class KLLTXDirectorWrapper:
     """
     Simplified LTX Director.
     Supports "type": "image" (requires url) or "type": "text" (prompt only).
+    支持的输入参数格式：
+    {
+  "images": [
+    {
+      "url": "https://example.com/cat.jpg",
+      "start": 0.0,
+      "duration": 3.0,
+      "prompt": "a cute cat sitting on a sofa",
+      "type": "image",
+      "strength": 1.0
+    },
+    {
+      "start": 3.0,
+      "duration": 2.0,
+      "prompt": "camera slowly zooms out, cinematic transition",
+      "type": "text"
+    },
+    {
+      "url": "https://example.com/dog.jpg",
+      "start": 5.0,
+      "duration": 4.0,
+      "prompt": "a dog running in the park",
+      "type": "image",
+      "strength": 0.8
+    }
+  ],
+  "audio": {
+    "url": "https://example.com/background_music.mp3",
+    "start": 0.0,
+    "duration": 9.0
+  },
+  "global_prompt": "4k, highly detailed, cinematic lighting, masterpiece",
+  "frame_rate": 24,
+  "width": 768,
+  "height": 512,
+  "resize_method": "maintain aspect ratio",
+  "divisible_by": 32,
+  "img_compression": 18,
+  "epsilon": 0.001
+}
     """
 
     @classmethod
@@ -23,7 +85,8 @@ class KLLTXDirectorWrapper:
                 "clip": ("CLIP",),
                 "user_config": ("STRING", {
                     "multiline": True,
-                    "default": '{"images": [], "audio": null, "global_prompt": "", "frame_rate": 24, "width": 768, "height": 512}'
+                    "default": '{"images": [], "audio": null, "global_prompt": "", "frame_rate": 24, "width": 768, '
+                               '"height": 512} '
                 }),
             },
             "optional": {
@@ -38,27 +101,30 @@ class KLLTXDirectorWrapper:
     FUNCTION = "execute"
 
     def execute(self, model, clip, user_config, audio_vae=None, optional_latent=None):
+        # 1. 解析用户配置（宽容模式）
         try:
-            config = json.loads(user_config)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid user_config JSON: {e}")
+            config = parse_user_config(user_config)
+        except ValueError as e:
+            log.error(f"Failed to parse user_config: {e}")
+            raise e
 
         images = config.get("images", [])
         audio = config.get("audio")
         global_prompt = config.get("global_prompt", "")
         frame_rate = config.get("frame_rate", 24)
-        width = config.get("width", 768)
-        height = config.get("height", 512)
+        width = config.get("width", 0)          # 允许 0 表示自适应
+        height = config.get("height", 0)
         resize_method = config.get("resize_method", "maintain aspect ratio")
         divisible_by = config.get("divisible_by", 32)
         img_compression = config.get("img_compression", 18)
         epsilon = config.get("epsilon", 0.001)
 
-        segments = []
+        # 2. 构建原始段列表（未排序）
+        raw_segments = []
         audio_segments = []
         total_frames = 0
+        image_count = 0
 
-        # 2. Build segments (supports both image and text types)
         for idx, item in enumerate(images):
             start_sec = item.get("start")
             duration_sec = item.get("duration", 3.0)
@@ -70,10 +136,9 @@ class KLLTXDirectorWrapper:
                 start_frames = int(start_sec * frame_rate)
 
             prompt = item.get("prompt", "")
-            seg_type = item.get("type", "image")  # default to image
+            seg_type = item.get("type", "image")
 
             if seg_type == "text":
-                # --- 纯文本段：不需要 url ---
                 seg = {
                     "id": f"seg_{idx}_{id(item)}",
                     "start": start_frames,
@@ -81,17 +146,20 @@ class KLLTXDirectorWrapper:
                     "prompt": prompt,
                     "type": "text",
                 }
-                segments.append(seg)
+                raw_segments.append(seg)
                 total_frames = max(total_frames, start_frames + length_frames)
                 continue
 
-            # --- 图片段：必须有 url ---
+            # 图片段：必须有 url
             url = item.get("url", "")
             if not url:
                 log.warning(f"Image segment {idx} has no URL, skipping.")
                 continue
 
             strength = item.get("strength", 1.0)
+            # 钳制 strength 范围
+            strength = max(0.0, min(1.0, strength))
+
             seg = {
                 "id": f"seg_{idx}_{id(item)}",
                 "start": start_frames,
@@ -101,21 +169,25 @@ class KLLTXDirectorWrapper:
                 "imageUrl": url,
                 "guideStrength": strength,
             }
-            segments.append(seg)
+            raw_segments.append(seg)
+            image_count += 1
             total_frames = max(total_frames, start_frames + length_frames)
 
-        # Fallback if no valid segments at all
-        if not segments:
-            segments.append({
-                "id": "placeholder",
-                "start": 0,
-                "length": max(24, int(1 * frame_rate)),
-                "prompt": "empty",
-                "type": "text",
-            })
-            total_frames = max(24, total_frames)
+        # 检查是否有任何图片段
+        if image_count == 0:
+            raise ValueError(
+                "No valid image segments found in user_config. "
+                "At least one image with a valid 'url' is required for quality generation."
+            )
 
-        # 3. Build audio segment (unchanged)
+        # 3. 按 start 排序所有段（关键！）
+        sorted_segments = sorted(raw_segments, key=lambda s: s["start"])
+        # 重新计算总帧数（基于排序后的段）
+        total_frames = 0
+        for seg in sorted_segments:
+            total_frames = max(total_frames, seg["start"] + seg["length"])
+
+        # 4. 处理音频（不变）
         if audio:
             audio_start_sec = audio.get("start", 0)
             audio_duration_sec = audio.get("duration", 0)
@@ -139,23 +211,27 @@ class KLLTXDirectorWrapper:
         if total_frames <= 0:
             total_frames = 24
 
-        # 4. Build timeline_data
+        # 5. 构建 timeline_data（使用排序后的段）
         timeline_data = {
-            "segments": segments,
+            "segments": sorted_segments,
             "audioSegments": audio_segments,
         }
         timeline_json = json.dumps(timeline_data)
 
-        local_prompts = " | ".join([seg.get("prompt", "") for seg in segments])
-        segment_lengths = ",".join([str(seg.get("length", 24)) for seg in segments])
+        # 6. 构建辅助字符串（均基于排序后的段）
+        local_prompts = " | ".join([seg.get("prompt", "") for seg in sorted_segments])
+        segment_lengths = ",".join([str(seg.get("length", 24)) for seg in sorted_segments])
 
-        # 图片段用实际 strength，文本段用 0.0（对 guide 无影响）
-        guide_strength = ",".join([
-            str(seg.get("guideStrength", 1.0)) if seg.get("type") == "image" else "0.0"
-            for seg in segments
-        ])
+        # 关键修复：guide_strength 只包含图片段，按排序后的顺序
+        sorted_image_segments = [s for s in sorted_segments if s.get("type") == "image"]
+        guide_strength = ",".join([str(s.get("guideStrength", 1.0)) for s in sorted_image_segments])
 
-        # 5. Delegate
+        # 日志输出便于调试
+        log.info(f"[LTX Director Wrapper] Total frames: {total_frames}, frame_rate: {frame_rate}")
+        log.info(f"[LTX Director Wrapper] Image segments: {len(sorted_image_segments)}, guide_strength: {guide_strength}")
+        log.info(f"[LTX Director Wrapper] Segment prompts: {local_prompts}")
+
+        # 7. 委托给原始 KLLTXDirector
         result = KLLTXDirector.execute(
             model=model,
             clip=clip,
