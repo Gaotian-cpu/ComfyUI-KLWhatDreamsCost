@@ -6,6 +6,7 @@ from .load_audio_ui import KLLoadAudioUI
 from .load_video_ui import KLLoadVideoUI
 from .ltx_director import KLLTXDirector
 from .ltx_director_guide import LTXDirectorGuide
+from .ltx_director_api import KLLTXDirectorWrapper
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -31,6 +32,7 @@ NODE_CLASS_MAPPINGS = {
     "KL LoadVideoUI": KLLoadVideoUI,
     "KL LTXDirector": KLLTXDirector,
     "KL LTXDirectorGuide": LTXDirectorGuide,
+    'KL LTXDirectorAPI': KLLTXDirectorWrapper
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -42,6 +44,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "KL LoadVideoUI": "KL Load Video UI",
     "KL LTXDirector": "KL LTX Director",
     "KL LTXDirectorGuide": "KL LTX Director Guide",
+    'KL LTXDirectorAPI': 'KL LTX Director API'
 }
 
 WEB_DIRECTORY = "./js"
