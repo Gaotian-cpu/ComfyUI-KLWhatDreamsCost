@@ -32,7 +32,7 @@ NODE_CLASS_MAPPINGS = {
     "KL LoadVideoUI": KLLoadVideoUI,
     "KL LTXDirector": KLLTXDirector,
     "KL LTXDirectorGuide": LTXDirectorGuide,
-    'KL LTXDirectorAPI': KLLTXDirectorWrapper
+    'KL LTX Director (Auto)': KLLTXDirectorWrapper
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -44,7 +44,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "KL LoadVideoUI": "KL Load Video UI",
     "KL LTXDirector": "KL LTX Director",
     "KL LTXDirectorGuide": "KL LTX Director Guide",
-    'KL LTXDirectorAPI': 'KL LTX Director API'
+    'KL LTX Director (Auto)': 'KL LTX Director (Auto)'
 }
 
 WEB_DIRECTORY = "./js"
