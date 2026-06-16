@@ -11,8 +11,8 @@ log = logging.getLogger(__name__)
 
 class KLLTXDirectorWrapper:
     """
-    Simplified LTX Director (Legacy API compatible).
-    Accepts a JSON config and delegates to the original Director.
+    Simplified LTX Director.
+    Supports "type": "image" (requires url) or "type": "text" (prompt only).
     """
 
     @classmethod
@@ -38,7 +38,6 @@ class KLLTXDirectorWrapper:
     FUNCTION = "execute"
 
     def execute(self, model, clip, user_config, audio_vae=None, optional_latent=None):
-        # 1. Parse user JSON
         try:
             config = json.loads(user_config)
         except json.JSONDecodeError as e:
@@ -59,20 +58,43 @@ class KLLTXDirectorWrapper:
         audio_segments = []
         total_frames = 0
 
-        # 2. Build image segments
-        for idx, img in enumerate(images):
-            start = img.get("start", total_frames)
-            duration_sec = img.get("duration", 3.0)
+        # 2. Build segments (supports both image and text types)
+        for idx, item in enumerate(images):
+            start_sec = item.get("start")
+            duration_sec = item.get("duration", 3.0)
             length_frames = int(duration_sec * frame_rate)
-            prompt = img.get("prompt", "")
-            strength = img.get("strength", 1.0)
-            url = img.get("url", "")
-            if not url:
-                log.warning(f"Image {idx} has no URL, skipping.")
+
+            if start_sec is None:
+                start_frames = total_frames
+            else:
+                start_frames = int(start_sec * frame_rate)
+
+            prompt = item.get("prompt", "")
+            seg_type = item.get("type", "image")  # default to image
+
+            if seg_type == "text":
+                # --- 纯文本段：不需要 url ---
+                seg = {
+                    "id": f"seg_{idx}_{id(item)}",
+                    "start": start_frames,
+                    "length": length_frames,
+                    "prompt": prompt,
+                    "type": "text",
+                }
+                segments.append(seg)
+                total_frames = max(total_frames, start_frames + length_frames)
                 continue
+
+            # --- 图片段：必须有 url ---
+            url = item.get("url", "")
+            if not url:
+                log.warning(f"Image segment {idx} has no URL, skipping.")
+                continue
+
+            strength = item.get("strength", 1.0)
             seg = {
-                "id": f"seg_{idx}_{id(img)}",
-                "start": start,
+                "id": f"seg_{idx}_{id(item)}",
+                "start": start_frames,
                 "length": length_frames,
                 "prompt": prompt,
                 "type": "image",
@@ -80,9 +102,9 @@ class KLLTXDirectorWrapper:
                 "guideStrength": strength,
             }
             segments.append(seg)
-            total_frames = max(total_frames, start + length_frames)
+            total_frames = max(total_frames, start_frames + length_frames)
 
-        # Fallback if no images
+        # Fallback if no valid segments at all
         if not segments:
             segments.append({
                 "id": "placeholder",
@@ -93,16 +115,17 @@ class KLLTXDirectorWrapper:
             })
             total_frames = max(24, total_frames)
 
-        # 3. Build audio segment if provided
+        # 3. Build audio segment (unchanged)
         if audio:
-            audio_start = audio.get("start", 0)
+            audio_start_sec = audio.get("start", 0)
             audio_duration_sec = audio.get("duration", 0)
             audio_url = audio.get("url", "")
             if audio_url and audio_duration_sec > 0:
+                audio_start_frames = int(audio_start_sec * frame_rate)
                 audio_length_frames = int(audio_duration_sec * frame_rate)
                 audio_seg = {
                     "id": f"audio_{id(audio)}",
-                    "start": audio_start,
+                    "start": audio_start_frames,
                     "length": audio_length_frames,
                     "trimStart": 0,
                     "audioDurationFrames": audio_length_frames,
@@ -111,12 +134,12 @@ class KLLTXDirectorWrapper:
                     "waveformPeaks": [],
                 }
                 audio_segments.append(audio_seg)
-                total_frames = max(total_frames, audio_start + audio_length_frames)
+                total_frames = max(total_frames, audio_start_frames + audio_length_frames)
 
         if total_frames <= 0:
             total_frames = 24
 
-        # 4. Build timeline_data and auxiliary strings
+        # 4. Build timeline_data
         timeline_data = {
             "segments": segments,
             "audioSegments": audio_segments,
@@ -125,13 +148,14 @@ class KLLTXDirectorWrapper:
 
         local_prompts = " | ".join([seg.get("prompt", "") for seg in segments])
         segment_lengths = ",".join([str(seg.get("length", 24)) for seg in segments])
+
+        # 图片段用实际 strength，文本段用 0.0（对 guide 无影响）
         guide_strength = ",".join([
             str(seg.get("guideStrength", 1.0)) if seg.get("type") == "image" else "0.0"
             for seg in segments
         ])
 
-        # 5. Delegate to the original KLLTXDirector (Class Method)
-        # Note: KLLTXDirector.execute is a @classmethod, so we call it directly.
+        # 5. Delegate
         result = KLLTXDirector.execute(
             model=model,
             clip=clip,
@@ -155,5 +179,4 @@ class KLLTXDirectorWrapper:
             use_custom_audio=bool(audio)
         )
 
-        # result is a tuple in the order defined by KLLTXDirector's outputs
         return result
