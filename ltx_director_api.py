@@ -4,53 +4,40 @@ LTX Director，为服务端做的节点
 """
 import json
 import logging
-from comfy_api.latest import io
 from .ltx_director import KLLTXDirector, GuideData
 
 log = logging.getLogger(__name__)
 
 
-class KLLTXDirectorWrapper(io.ComfyNode):
+class KLLTXDirectorWrapper:
     """
-    Automated LTX Director – accepts a simple JSON config,
-    builds the timeline_data internally, and delegates to the original Director.
+    Simplified LTX Director (Legacy API compatible).
+    Accepts a JSON config and delegates to the original Director.
     """
 
     @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="KL LTXDirectorWrapper",
-            display_name="KL LTX Director (Auto)",
-            category="KL WhatDreamsCost",
-            description=(
-                "Simplified LTX Director. Provide a JSON with image/audio configs, "
-                "and this node will automatically construct the timeline_data and execute."
-            ),
-            inputs=[
-                io.Model.Input("model"),
-                io.Clip.Input("clip"),
-                io.Vae.Input("audio_vae", optional=True),
-                io.Latent.Input("optional_latent", optional=True),
-                io.String.Input(
-                    "user_config",
-                    multiline=True,
-                    default='{"images": [], "audio": null, "global_prompt": "", "frame_rate": 24, "width": 768, "height": 512}',
-                    tooltip="JSON config with fields: images (list of {url, start, duration, prompt, strength}), audio (optional {url, start, duration}), global_prompt, frame_rate, width, height."
-                ),
-            ],
-            outputs=[
-                io.Model.Output(display_name="model"),
-                io.Conditioning.Output(display_name="positive"),
-                io.Latent.Output(display_name="video_latent"),
-                io.Latent.Output(display_name="audio_latent"),
-                GuideData.Output(display_name="guide_data"),
-                io.Float.Output(display_name="frame_rate"),
-                io.Audio.Output(display_name="combined_audio"),
-            ],
-        )
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "user_config": ("STRING", {
+                    "multiline": True,
+                    "default": '{"images": [], "audio": null, "global_prompt": "", "frame_rate": 24, "width": 768, "height": 512}'
+                }),
+            },
+            "optional": {
+                "audio_vae": ("VAE",),
+                "optional_latent": ("LATENT",),
+            }
+        }
 
-    @classmethod
-    def execute(cls, model, clip, user_config, audio_vae=None, optional_latent=None):
+    CATEGORY = "KL WhatDreamsCost"
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "LATENT", "LATENT", "GUIDE_DATA", "FLOAT", "AUDIO")
+    RETURN_NAMES = ("model", "positive", "video_latent", "audio_latent", "guide_data", "frame_rate", "combined_audio")
+    FUNCTION = "execute"
+
+    def execute(self, model, clip, user_config, audio_vae=None, optional_latent=None):
         # 1. Parse user JSON
         try:
             config = json.loads(user_config)
@@ -58,7 +45,7 @@ class KLLTXDirectorWrapper(io.ComfyNode):
             raise ValueError(f"Invalid user_config JSON: {e}")
 
         images = config.get("images", [])
-        audio = config.get("audio")  # dict or None
+        audio = config.get("audio")
         global_prompt = config.get("global_prompt", "")
         frame_rate = config.get("frame_rate", 24)
         width = config.get("width", 768)
@@ -143,7 +130,8 @@ class KLLTXDirectorWrapper(io.ComfyNode):
             for seg in segments
         ])
 
-        # 5. Delegate to the original KLLTXDirector
+        # 5. Delegate to the original KLLTXDirector (Class Method)
+        # Note: KLLTXDirector.execute is a @classmethod, so we call it directly.
         result = KLLTXDirector.execute(
             model=model,
             clip=clip,
@@ -164,7 +152,8 @@ class KLLTXDirectorWrapper(io.ComfyNode):
             img_compression=img_compression,
             audio_vae=audio_vae,
             optional_latent=optional_latent,
-            use_custom_audio=bool(audio)  # enable custom audio if audio config is present
+            use_custom_audio=bool(audio)
         )
 
+        # result is a tuple in the order defined by KLLTXDirector's outputs
         return result
