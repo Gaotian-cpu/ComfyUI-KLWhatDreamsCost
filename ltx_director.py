@@ -866,7 +866,7 @@ def _encode_relay(model, clip, latent, global_prompt, local_prompts, segment_len
     return patched, conditioning
 
 
-class LTXDirector(io.ComfyNode):
+class KLLTXDirector(io.ComfyNode):
     """WYSIWYG timeline variant — segments and lengths come from a visual editor in the node UI."""
 
     @classmethod
@@ -1372,7 +1372,7 @@ class LTXDirector(io.ComfyNode):
 
 
 NODE_CLASS_MAPPINGS = {
-    "LTXDirector": LTXDirector,
+    "LTXDirector": KLLTXDirector,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {

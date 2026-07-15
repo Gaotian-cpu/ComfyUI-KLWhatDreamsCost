@@ -2,7 +2,7 @@ import torch
 import comfy.utils
 from comfy_api.latest import io
 
-class LTXKeyframer(io.ComfyNode):
+class KLLTXKeyframer(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         inputs = [

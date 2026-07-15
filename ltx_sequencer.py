@@ -3,7 +3,7 @@ import torch
 import comfy.utils
 from comfy_api.latest import io
 
-class LTXSequencer(LTXVAddGuide):
+class KLLTXSequencer(LTXVAddGuide):
     @classmethod
     def define_schema(cls):
         inputs = [

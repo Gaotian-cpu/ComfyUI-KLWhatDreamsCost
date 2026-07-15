@@ -48,7 +48,7 @@ async def upload_chunk(request):
     return web.json_response({"status": "ok"})
 
 
-class LoadVideoUI:
+class KLLoadVideoUI:
     @classmethod
     def INPUT_TYPES(cls):
         input_dir = folder_paths.get_input_directory()

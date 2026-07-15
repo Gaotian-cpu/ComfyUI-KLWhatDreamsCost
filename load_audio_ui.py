@@ -39,7 +39,7 @@ def load_audio_file(filepath: str) -> tuple[torch.Tensor, int]:
         return wav, sr
 
 
-class LoadAudioUI:
+class KLLoadAudioUI:
     @classmethod
     def INPUT_TYPES(s):
         try:

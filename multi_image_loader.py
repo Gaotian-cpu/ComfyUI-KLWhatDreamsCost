@@ -7,7 +7,7 @@ import folder_paths
 import io
 import comfy.utils
 
-class MultiImageLoader:
+class KLMultiImageLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {

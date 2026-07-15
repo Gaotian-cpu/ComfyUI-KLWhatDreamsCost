@@ -1,7 +1,7 @@
 import re
 import math
 
-class SpeechLengthCalculator:
+class KLSpeechLengthCalculator:
     @classmethod
     def INPUT_TYPES(s):
         return {
