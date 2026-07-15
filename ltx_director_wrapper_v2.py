@@ -53,7 +53,7 @@ class KLLTXDirectorWrapperV2:
                     "multiline": True,
                     "default": '{"images": [], "motion": [], "audio": null, "retake": null}'
                 }),
-                "frame_rate": ("INT", {"default": 24, "min": 1, "max": 240, "step": 1}),
+                "frame_rate": ("FLOAT", {"default": 24.0, "min": 16.0, "max": 99.0, "step": 1}),
                 "width": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
                 "height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
                 "global_prompt": ("STRING", {"default": "", "multiline": True}),
