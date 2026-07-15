@@ -1,0 +1,47 @@
+{
+  "images": [
+    {
+      "url": "https://example.com/cat.jpg",
+      "start": 0.0,
+      "duration": 3.0,
+      "prompt": "a cat",
+      "type": "image",
+      "strength": 1.0
+    },
+    {
+      "start": 3.0,
+      "duration": 2.0,
+      "prompt": "transition scene",
+      "type": "text"
+    },
+    {
+      "url": "https://example.com/dog_video.mp4",
+      "start": 5.0,
+      "duration": 4.0,
+      "prompt": "dog running",
+      "type": "video",
+      "strength": 0.8
+    }
+  ],
+  "motion": [
+    {
+      "url": "https://example.com/reference_video.mp4",
+      "start": 0.0,
+      "duration": 10.0,
+      "videoStrength": 1.0,
+      "videoAttentionStrength": 0.65
+    }
+  ],
+  "audio": {
+    "url": "https://example.com/music.mp3",
+    "start": 0.0,
+    "duration": 10.0
+  },
+  "retake": {
+    "video_url": "https://example.com/base_video.mp4",
+    "start": 0.0,
+    "length": 5.0,
+    "prompt": "regenerate this part",
+    "strength": 1.0
+  },
+}

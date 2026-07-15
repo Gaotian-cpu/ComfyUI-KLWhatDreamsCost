@@ -11,26 +11,6 @@ from .ltx_director import KLLTXDirector, GuideData, MotionGuideData
 log = logging.getLogger(__name__)
 
 
-def parse_user_config(raw_text: str) -> dict:
-    """宽容解析 JSON：去除 BOM，提取第一个完整 JSON 对象，忽略尾部多余内容。"""
-    text = raw_text.lstrip('\ufeff').strip()
-    if not text:
-        return {}
-    decoder = json.JSONDecoder()
-    try:
-        obj, _ = decoder.raw_decode(text)
-        return obj
-    except json.JSONDecodeError:
-        start = text.find('{')
-        if start == -1:
-            raise ValueError("No JSON object found in input.")
-        try:
-            obj, _ = decoder.raw_decode(text[start:])
-            return obj
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Could not parse JSON. Received (first 200 chars):\n{text[start:start+200]}") from e
-
-
 class KLLTXDirectorWrapperV2:
     """
     简化版 LTX Director V2，支持新特性：
@@ -38,8 +18,31 @@ class KLLTXDirectorWrapperV2:
     - IC-LoRA 参考段 (motion)
     - 音频段 (audio)
     - Retake 模式 (retake)
-    - 全局参数
+    所有全局参数均为节点控件。
     """
+
+    @staticmethod
+    def parse_user_config(raw_text: str) -> dict:
+        """
+        宽容解析 JSON：去除 BOM，提取第一个完整 JSON 对象，忽略尾部多余内容。
+        """
+        text = raw_text.lstrip('\ufeff').strip()
+        if not text:
+            return {}
+        decoder = json.JSONDecoder()
+        try:
+            obj, _ = decoder.raw_decode(text)
+            return obj
+        except json.JSONDecodeError:
+            start = text.find('{')
+            if start == -1:
+                raise ValueError("No JSON object found in input.")
+            try:
+                obj, _ = decoder.raw_decode(text[start:])
+                return obj
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Could not parse JSON. Received (first 200 chars):\n{text[start:start+200]}") from e
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -48,9 +51,20 @@ class KLLTXDirectorWrapperV2:
                 "clip": ("CLIP",),
                 "user_config": ("STRING", {
                     "multiline": True,
-                    "default": '{"images": [], "motion": [], "audio": null, "retake": null, "global_prompt": "", '
-                               '"frame_rate": 24, "width": 768, "height": 512} '
+                    "default": '{"images": [], "motion": [], "audio": null, "retake": null}'
                 }),
+                "frame_rate": ("INT", {"default": 24, "min": 1, "max": 240, "step": 1}),
+                "width": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
+                "height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
+                "global_prompt": ("STRING", {"default": "", "multiline": True}),
+                "resize_method": (["maintain aspect ratio", "stretch to fit", "pad", "pad green", "crop"], {"default": "maintain aspect ratio"}),
+                "divisible_by": ("INT", {"default": 32, "min": 1, "max": 256, "step": 1}),
+                "img_compression": ("INT", {"default": 18, "min": 0, "max": 100, "step": 1}),
+                "epsilon": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.99, "step": 0.0001}),
+                "use_custom_audio": ("BOOLEAN", {"default": True}),
+                "inpaint_audio": ("BOOLEAN", {"default": True}),
+                "use_custom_motion": ("BOOLEAN", {"default": True}),
+                "override_audio": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "audio_vae": ("VAE",),
@@ -63,10 +77,16 @@ class KLLTXDirectorWrapperV2:
     RETURN_NAMES = ("model", "positive", "video_latent", "audio_latent", "guide_data", "motion_guide_data", "frame_rate", "combined_audio")
     FUNCTION = "execute"
 
-    def execute(self, model, clip, user_config, audio_vae=None, optional_latent=None):
-        # 1. 解析配置
+    def execute(self, model, clip, user_config,
+                frame_rate, width, height,
+                global_prompt, resize_method, divisible_by,
+                img_compression, epsilon,
+                use_custom_audio, inpaint_audio,
+                use_custom_motion, override_audio,
+                audio_vae=None, optional_latent=None):
+        # 1. 解析配置（仅包含动态数据）
         try:
-            config = parse_user_config(user_config)
+            config = self.parse_user_config(user_config)
         except ValueError as e:
             log.error(f"Failed to parse user_config: {e}")
             raise e
@@ -75,18 +95,6 @@ class KLLTXDirectorWrapperV2:
         motion = config.get("motion", [])
         audio = config.get("audio")
         retake = config.get("retake")
-        global_prompt = config.get("global_prompt", "")
-        frame_rate = config.get("frame_rate", 24)
-        width = config.get("width", 0)          # 0 表示自适应
-        height = config.get("height", 0)
-        resize_method = config.get("resize_method", "maintain aspect ratio")
-        divisible_by = config.get("divisible_by", 32)
-        img_compression = config.get("img_compression", 18)
-        epsilon = config.get("epsilon", 0.001)
-        use_custom_audio = config.get("use_custom_audio", True)
-        inpaint_audio = config.get("inpaint_audio", True)
-        use_custom_motion = config.get("use_custom_motion", True)
-        override_audio = config.get("override_audio", False)
 
         # 2. 构建 segments (主轨道)
         segments = []
@@ -100,13 +108,11 @@ class KLLTXDirectorWrapperV2:
             duration = item.get("duration", 3.0)
             prompt = item.get("prompt", "")
             strength = item.get("strength", 1.0)
-            # 处理 start 未指定情况：自动接续
             if start is None:
                 start = start_sec
             start_frames = int(start * frame_rate)
             length_frames = int(duration * frame_rate)
 
-            # 构建段对象
             seg = {
                 "id": f"seg_{idx}_{id(item)}",
                 "start": start_frames,
@@ -133,16 +139,15 @@ class KLLTXDirectorWrapperV2:
                 seg["imageB64"] = url
                 seg["guideStrength"] = strength
                 seg["trimStart"] = 0
-                seg["videoDurationFrames"] = length_frames   # 暂定，后续可从实际视频获取
+                seg["videoDurationFrames"] = length_frames
             else:
                 log.warning(f"Unknown segment type '{seg_type}' at index {idx}, skipping.")
                 continue
 
             segments.append(seg)
             total_frames = max(total_frames, start_frames + length_frames)
-            start_sec = start + duration   # 更新累计起始时间
+            start_sec = start + duration
 
-        # 如果没有有效段，创建占位文本段
         if not segments:
             segments.append({
                 "id": "placeholder",
@@ -163,20 +168,18 @@ class KLLTXDirectorWrapperV2:
             duration = item.get("duration", 5.0)
             video_strength = item.get("videoStrength", 1.0)
             video_attention_strength = item.get("videoAttentionStrength", 0.65)
-            # 判断是否为静态图片（通过扩展名或type）
             is_image = item.get("type") == "image" or url.lower().endswith(('.jpg','.jpeg','.png','.webp'))
-            seg_type = "motion_video" if not is_image else "motion_video"  # 统一为motion_video，isStaticImage标记
             start_frames = int(start * frame_rate)
             length_frames = int(duration * frame_rate)
 
             seg = {
                 "id": f"motion_{idx}_{id(item)}",
-                "type": seg_type,
+                "type": "motion_video",
                 "start": start_frames,
                 "length": length_frames,
                 "trimStart": 0,
                 "videoDurationFrames": length_frames,
-                "videoFile": "",   # 上传后填充
+                "videoFile": "",
                 "videoUrl": url,
                 "fileName": url.split("/")[-1],
                 "videoStrength": video_strength,
@@ -207,7 +210,7 @@ class KLLTXDirectorWrapperV2:
                     "trimStart": 0,
                     "audioDurationFrames": audio_length_frames,
                     "audioUrl": audio_url,
-                    "audioFile": "",   # 上传后填充
+                    "audioFile": "",
                     "fileName": audio_url.split("/")[-1],
                     "waveformPeaks": [],
                 }
@@ -217,7 +220,7 @@ class KLLTXDirectorWrapperV2:
         if total_frames <= 0:
             total_frames = 24
 
-        # 5. 处理 Retake 模式
+        # 5. Retake 模式
         retake_mode = False
         retake_video = None
         retake_start = 0
@@ -234,22 +237,13 @@ class KLLTXDirectorWrapperV2:
                 retake_strength = retake.get("strength", 1.0)
                 retake_video = {
                     "fileName": video_url.split("/")[-1],
-                    "imageFile": "",   # 上传后填充
+                    "imageFile": "",
                     "videoDurationFrames": retake_length,
                     "fileSize": 0,
                 }
-                # 注意：retake 视频的 URL 需要能通过 _load_video_tensor 加载，
-                # 但该函数依赖本地文件，因此这里仅作占位，实际需要上传或提供本地路径。
-                # 为简化，我们暂时将 URL 存入 imageUrl 字段供前端预览，但后端需处理。
-                # 更好的做法是要求用户上传到 ComfyUI input 目录。
-                # 由于 wrapper 是服务端调用，我们可以接受 URL 并在 execute 中临时下载？
-                # 这里先保留，后续可扩展。
                 log.warning("Retake mode with remote URL may not work unless file is already in input directory.")
-                # 为了支持远程 URL，我们可以在 timeline_data 中放入 videoUrl 字段，但原始节点只认 imageFile。
-                # 因此建议用户将视频放入 input 目录。
-                # 此处我们仅构造基本结构，供用户后续手动处理。
 
-        # 6. 构建完整的 timeline_data（包含所有轨道和设置）
+        # 6. 构建完整的 timeline_data
         timeline_data = {
             "segments": segments,
             "motionSegments": motion_segments,
@@ -273,17 +267,13 @@ class KLLTXDirectorWrapperV2:
         }
         timeline_json = json.dumps(timeline_data)
 
-        # 7. 生成辅助字段 (local_prompts, segment_lengths, guide_strength)
-        # 排序 segments 按 start
+        # 7. 辅助字段
         sorted_segments = sorted(segments, key=lambda s: s["start"])
         local_prompts = " | ".join([s.get("prompt", "") for s in sorted_segments])
         segment_lengths = ",".join([str(s.get("length", 24)) for s in sorted_segments])
-        # guide_strength 只针对 type image/video
         sorted_image_segments = [s for s in sorted_segments if s.get("type") in ("image", "video")]
         guide_strength = ",".join([str(s.get("guideStrength", 1.0)) for s in sorted_image_segments])
 
-        # 8. 计算 start_frame, end_frame, duration_frames
-        # 在 V2 中，start_frame 和 end_frame 用于定义生成范围，我们设置为 0 和 total_frames
         start_frame = 0
         end_frame = total_frames
         duration_frames = total_frames
@@ -291,7 +281,7 @@ class KLLTXDirectorWrapperV2:
         end_second = duration_frames / float(frame_rate)
         duration_seconds = duration_frames / float(frame_rate)
 
-        # 9. 调用原始 LTXDirector
+        # 8. 调用原始 LTXDirector
         result = KLLTXDirector.execute(
             model=model,
             clip=clip,
@@ -308,7 +298,7 @@ class KLLTXDirectorWrapperV2:
             guide_strength=guide_strength,
             epsilon=epsilon,
             frame_rate=frame_rate,
-            display_mode="frames",   # 内部使用帧
+            display_mode="frames",
             custom_width=width,
             custom_height=height,
             resize_method=resize_method,
